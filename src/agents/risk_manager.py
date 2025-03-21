@@ -1,83 +1,98 @@
+from typing import Dict, Any
 from langchain_core.messages import HumanMessage
 from graph.state import AgentState, show_agent_reasoning
 from utils.progress import progress
-from tools.api import get_prices, prices_to_df
 import json
 
+from tools.api import get_prices
+from .base_agent import BaseAgent, AgentSignal
 
-##### Risk Management Agent #####
-def risk_management_agent(state: AgentState):
-    """Controls position sizing based on real-world risk factors for multiple tickers."""
-    portfolio = state["data"]["portfolio"]
-    data = state["data"]
-    tickers = data["tickers"]
+class RiskManagerAgent(BaseAgent):
+    """Agent that manages portfolio risk and position sizing."""
+    
+    def __init__(self, name: str, description: str = "", config: Dict[str, Any] = None):
+        super().__init__(name, description or "Manages portfolio risk and position sizing", config)
+        self.max_position_size = config.get("max_position_size", 100000)  # Default $100k per position
+        self.max_portfolio_risk = config.get("max_portfolio_risk", 0.20)  # Default 20% max risk
+        self.stop_loss = config.get("stop_loss", 0.15)  # Default 15% stop loss
+        self.position_sizing_method = config.get("position_sizing_method", "equal_weight")
+    
+    def analyze(self, state: AgentState) -> Dict[str, AgentSignal]:
+        """Analyzes risk factors and sets position limits for multiple tickers."""
+        data = state["data"]
+        end_date = data["end_date"]
+        start_date = data["start_date"]
+        tickers = data["tickers"]
+        portfolio = state["portfolio"]
 
-    # Initialize risk analysis for each ticker
-    risk_analysis = {}
-    current_prices = {}  # Store prices here to avoid redundant API calls
+        # Initialize risk analysis for each ticker
+        risk_analysis = {}
 
-    for ticker in tickers:
-        progress.update_status("risk_management_agent", ticker, "Analyzing price data")
+        for ticker in tickers:
+            progress.update_status(self.name, ticker, "Analyzing risk factors")
+            
+            try:
+                # Get price data for volatility calculation
+                prices = get_prices(ticker, start_date, end_date)
+                if not prices:
+                    risk_analysis[ticker] = AgentSignal(
+                        signal="neutral",
+                        confidence=0,
+                        reasoning="No price data available for risk analysis"
+                    )
+                    continue
 
-        prices = get_prices(
-            ticker=ticker,
-            start_date=data["start_date"],
-            end_date=data["end_date"],
-        )
+                # Calculate volatility
+                returns = [(p.close - prices[i-1].close) / prices[i-1].close for i, p in enumerate(prices) if i > 0]
+                volatility = (sum(r * r for r in returns) / len(returns)) ** 0.5 * (252 ** 0.5)  # Annualized
 
-        if not prices:
-            progress.update_status("risk_management_agent", ticker, "Failed: No price data found")
-            continue
+                # Calculate position size based on risk
+                position_size = min(
+                    self.max_position_size,
+                    portfolio["cash"] * (1 / len(tickers))  # Equal weight
+                )
 
-        prices_df = prices_to_df(prices)
+                # Adjust position size based on volatility
+                if volatility > 0.4:  # High volatility
+                    position_size *= 0.5
+                    risk_level = "high"
+                elif volatility > 0.2:  # Medium volatility
+                    position_size *= 0.75
+                    risk_level = "medium"
+                else:  # Low volatility
+                    risk_level = "low"
 
-        progress.update_status("risk_management_agent", ticker, "Calculating position limits")
+                # Set stop loss based on volatility
+                stop_loss = max(self.stop_loss, volatility)
 
-        # Calculate portfolio value
-        current_price = prices_df["close"].iloc[-1]
-        current_prices[ticker] = current_price  # Store the current price
+                # Generate signal based on risk assessment
+                signal = "neutral"
+                if risk_level == "low" and position_size >= self.max_position_size * 0.8:
+                    signal = "bullish"
+                elif risk_level == "high" and position_size <= self.max_position_size * 0.5:
+                    signal = "bearish"
 
-        # Calculate current position value for this ticker
-        current_position_value = portfolio.get("cost_basis", {}).get(ticker, 0)
+                # Store the analysis results
+                risk_analysis[ticker] = AgentSignal(
+                    signal=signal,
+                    confidence=0.8,  # High confidence in risk assessment
+                    reasoning=f"Risk Level: {risk_level.upper()}\n" +
+                            f"Annual Volatility: {volatility:.1%}\n" +
+                            f"Recommended Position Size: ${position_size:,.0f}\n" +
+                            f"Stop Loss Level: {stop_loss:.1%}",
+                    metrics={
+                        "volatility": volatility,
+                        "position_size": position_size,
+                        "stop_loss": stop_loss,
+                        "risk_level": risk_level
+                    }
+                )
 
-        # Calculate total portfolio value using stored prices
-        total_portfolio_value = portfolio.get("cash", 0) + sum(portfolio.get("cost_basis", {}).get(t, 0) for t in portfolio.get("cost_basis", {}))
+            except Exception as e:
+                risk_analysis[ticker] = AgentSignal(
+                    signal="neutral",
+                    confidence=0,
+                    reasoning=f"Error in risk analysis: {str(e)}"
+                )
 
-        # Base limit is 20% of portfolio for any single position
-        position_limit = total_portfolio_value * 0.20
-
-        # For existing positions, subtract current position value from limit
-        remaining_position_limit = position_limit - current_position_value
-
-        # Ensure we don't exceed available cash
-        max_position_size = min(remaining_position_limit, portfolio.get("cash", 0))
-
-        risk_analysis[ticker] = {
-            "remaining_position_limit": float(max_position_size),
-            "current_price": float(current_price),
-            "reasoning": {
-                "portfolio_value": float(total_portfolio_value),
-                "current_position": float(current_position_value),
-                "position_limit": float(position_limit),
-                "remaining_limit": float(remaining_position_limit),
-                "available_cash": float(portfolio.get("cash", 0)),
-            },
-        }
-
-        progress.update_status("risk_management_agent", ticker, "Done")
-
-    message = HumanMessage(
-        content=json.dumps(risk_analysis),
-        name="risk_management_agent",
-    )
-
-    if state["metadata"]["show_reasoning"]:
-        show_agent_reasoning(risk_analysis, "Risk Management Agent")
-
-    # Add the signal to the analyst_signals list
-    state["data"]["analyst_signals"]["risk_management_agent"] = risk_analysis
-
-    return {
-        "messages": state["messages"] + [message],
-        "data": data,
-    }
+        return risk_analysis

@@ -2,6 +2,7 @@ from colorama import Fore, Style
 from tabulate import tabulate
 from .analysts import ANALYST_ORDER
 import os
+from typing import List, Dict, Any
 
 
 def sort_analyst_signals(signals):
@@ -13,186 +14,72 @@ def sort_analyst_signals(signals):
     return sorted(signals, key=lambda x: analyst_order.get(x[0], 999))
 
 
-def print_trading_output(result: dict) -> None:
-    """
-    Print formatted trading results with colored tables for multiple tickers.
+def print_trading_output(output: dict) -> None:
+    """Print trading analysis output in a nicely formatted way."""
+    decisions = output.get("decisions", {})
+    analyst_signals = output.get("analyst_signals", {})
 
-    Args:
-        result (dict): Dictionary containing decisions and analyst signals for multiple tickers
-    """
-    decisions = result.get("decisions")
-    if not decisions:
-        print(f"{Fore.RED}No trading decisions available{Style.RESET_ALL}")
-        return
-
-    # Print decisions for each ticker
-    for ticker, decision in decisions.items():
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}Analysis for {Fore.CYAN}{ticker}{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}{Style.BRIGHT}{'=' * 50}{Style.RESET_ALL}")
-
-        # Prepare analyst signals table for this ticker
-        table_data = []
-        for agent, signals in result.get("analyst_signals", {}).items():
-            if ticker not in signals:
-                continue
-
-            signal = signals[ticker]
-            agent_name = agent.replace("_agent", "").replace("_", " ").title()
-            signal_type = signal.get("signal", "").upper()
-
-            signal_color = {
-                "BULLISH": Fore.GREEN,
-                "BEARISH": Fore.RED,
-                "NEUTRAL": Fore.YELLOW,
-            }.get(signal_type, Fore.WHITE)
-
-            table_data.append(
-                [
-                    f"{Fore.CYAN}{agent_name}{Style.RESET_ALL}",
-                    f"{signal_color}{signal_type}{Style.RESET_ALL}",
-                    f"{Fore.YELLOW}{signal.get('confidence')}%{Style.RESET_ALL}",
-                ]
-            )
-
-        # Sort the signals according to the predefined order
-        table_data = sort_analyst_signals(table_data)
-
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}ANALYST SIGNALS:{Style.RESET_ALL} [{Fore.CYAN}{ticker}{Style.RESET_ALL}]")
-        print(
-            tabulate(
-                table_data,
-                headers=[f"{Fore.WHITE}Analyst", "Signal", "Confidence"],
-                tablefmt="grid",
-                colalign=("left", "center", "right"),
-            )
-        )
-
-        # Print Trading Decision Table
-        action = decision.get("action", "").upper()
-        action_color = {"BUY": Fore.GREEN, "SELL": Fore.RED, "HOLD": Fore.YELLOW}.get(action, Fore.WHITE)
-
-        decision_data = [
-            ["Action", f"{action_color}{action}{Style.RESET_ALL}"],
-            ["Quantity", f"{action_color}{decision.get('quantity')}{Style.RESET_ALL}"],
-            [
-                "Confidence",
-                f"{Fore.YELLOW}{decision.get('confidence'):.1f}%{Style.RESET_ALL}",
-            ],
-        ]
-
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}TRADING DECISION:{Style.RESET_ALL} [{Fore.CYAN}{ticker}{Style.RESET_ALL}]")
-        print(tabulate(decision_data, tablefmt="grid", colalign=("left", "right")))
-
-        # Print Reasoning
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}Reasoning:{Style.RESET_ALL} {Fore.CYAN}{decision.get('reasoning')}{Style.RESET_ALL}")
-
-    # Print Portfolio Summary
-    print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
-    portfolio_data = []
-    for ticker, decision in decisions.items():
-        action = decision.get("action", "").upper()
-        action_color = {
-            "BUY": Fore.GREEN,
-            "SELL": Fore.RED,
-            "HOLD": Fore.YELLOW,
-            "COVER": Fore.GREEN,
-            "SHORT": Fore.RED,
-        }.get(action, Fore.WHITE)
-        portfolio_data.append(
-            [
-                f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
-                f"{action_color}{action}{Style.RESET_ALL}",
-                f"{action_color}{decision.get('quantity')}{Style.RESET_ALL}",
-                f"{Fore.YELLOW}{decision.get('confidence'):.1f}%{Style.RESET_ALL}",
-            ]
-        )
-
-    print(
-        tabulate(
-            portfolio_data,
-            headers=[f"{Fore.WHITE}Ticker", "Action", "Quantity", "Confidence"],
-            tablefmt="grid",
-            colalign=("left", "center", "right", "right"),
-        )
-    )
-
-
-def print_backtest_results(table_rows: list) -> None:
-    """Print the backtest results in a nicely formatted table"""
-    # Clear the screen
-    os.system("cls" if os.name == "nt" else "clear")
-
-    # Split rows into ticker rows and summary rows
-    ticker_rows = []
-    summary_rows = []
-
-    for row in table_rows:
-        if isinstance(row[1], str) and "PORTFOLIO SUMMARY" in row[1]:
-            summary_rows.append(row)
-        else:
-            ticker_rows.append(row)
-
+    print("\nTRADING DECISIONS")
+    print("=" * 80)
+    print(f"{'Ticker':8} {'Action':8} {'Quantity':>10}")
+    print("-" * 80)
     
-    # Display latest portfolio summary
-    if summary_rows:
-        latest_summary = summary_rows[-1]
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
-
-        # Extract values and remove commas before converting to float
-        cash_str = latest_summary[7].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
-        position_str = latest_summary[6].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
-        total_str = latest_summary[8].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
-
-        print(f"Cash Balance: {Fore.CYAN}${float(cash_str):,.2f}{Style.RESET_ALL}")
-        print(f"Total Position Value: {Fore.YELLOW}${float(position_str):,.2f}{Style.RESET_ALL}")
-        print(f"Total Value: {Fore.WHITE}${float(total_str):,.2f}{Style.RESET_ALL}")
-        print(f"Return: {latest_summary[9]}")
+    for ticker, decision in decisions.items():
+        print(f"{ticker:8} {decision['action']:8} {decision['quantity']:>10}")
+    
+    print("\nANALYST SIGNALS")
+    print("=" * 80)
+    
+    for ticker, signals in analyst_signals.items():
+        print(f"\n{ticker} Analysis:")
+        print("-" * 40)
         
-        # Display performance metrics if available
-        if latest_summary[10]:  # Sharpe ratio
-            print(f"Sharpe Ratio: {latest_summary[10]}")
-        if latest_summary[11]:  # Sortino ratio
-            print(f"Sortino Ratio: {latest_summary[11]}")
-        if latest_summary[12]:  # Max drawdown
-            print(f"Max Drawdown: {latest_summary[12]}")
+        bullish = len([s for s in signals.values() if s["signal"].lower() == "bullish"])
+        bearish = len([s for s in signals.values() if s["signal"].lower() == "bearish"])
+        neutral = len([s for s in signals.values() if s["signal"].lower() == "neutral"])
+        
+        print(f"Signal Summary: {bullish} Bullish, {neutral} Neutral, {bearish} Bearish")
+        
+        for analyst, signal in signals.items():
+            print(f"\n{analyst}:")
+            print(f"  Signal: {signal['signal']}")
+            print(f"  Confidence: {signal['confidence']:.1f}")
+            print(f"  Reasoning: {signal['reasoning']}")
+    
+    print("\n" + "=" * 80)
 
-    # Add vertical spacing
-    print("\n" * 2)
 
-    # Print the table with just ticker rows
-    print(
-        tabulate(
-            ticker_rows,
-            headers=[
-                "Date",
-                "Ticker",
-                "Action",
-                "Quantity",
-                "Price",
-                "Shares",
-                "Position Value",
-                "Bullish",
-                "Bearish",
-                "Neutral",
-            ],
-            tablefmt="grid",
-            colalign=(
-                "left",  # Date
-                "left",  # Ticker
-                "center",  # Action
-                "right",  # Quantity
-                "right",  # Price
-                "right",  # Shares
-                "right",  # Position Value
-                "right",  # Bullish
-                "right",  # Bearish
-                "right",  # Neutral
-            ),
-        )
-    )
-
-    # Add vertical spacing
-    print("\n" * 4)
+def print_backtest_results(table_rows: List[Dict[str, Any]]) -> None:
+    """Print backtest results in a nicely formatted table."""
+    # Clear the screen
+    print("\033[2J\033[H")
+    
+    # Print header
+    print("\n" + "=" * 100)
+    print(f"{'Date':12} {'Ticker':8} {'Action':8} {'Qty':>8} {'Price':>10} {'Value':>12} {'Signal':>10}")
+    print("-" * 100)
+    
+    # Print rows
+    for row in table_rows:
+        if row.get("is_summary"):
+            print("-" * 100)
+            print(f"{row['date']:12} {'SUMMARY':8} {' ':8} {' ':8} {' ':10}", end=" ")
+            print(f"${row['total_value']:>11,.2f} {' ':10}")
+            print(f"{'':12} {'':8} {'Cash:':8} {' ':8} {' ':10}", end=" ")
+            print(f"${row['cash_balance']:>11,.2f} {' ':10}")
+            print(f"{'':12} {'':8} {'Return:':8} {' ':8} {' ':10}", end=" ")
+            print(f"{row['return_pct']:>11.2f}% {' ':10}")
+            if row.get('sharpe_ratio'):
+                print(f"{'':12} {'':8} {'Sharpe:':8} {' ':8} {' ':10}", end=" ")
+                print(f"{row['sharpe_ratio']:>11.2f} {' ':10}")
+            print("=" * 100)
+        else:
+            signal = f"{row['bullish_count']}/{row['neutral_count']}/{row['bearish_count']}"
+            print(f"{row['date']:12} {row['ticker']:8} {row['action']:8}", end=" ")
+            print(f"{row['quantity']:>8} ${row['price']:>9,.2f}", end=" ")
+            print(f"${row['position_value']:>11,.2f} {signal:>10}")
+    
+    print()
 
 
 def format_backtest_row(

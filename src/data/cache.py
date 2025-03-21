@@ -1,84 +1,107 @@
+from typing import TypeVar, Type
+from pydantic import BaseModel
+
+T = TypeVar('T', bound=BaseModel)
+
 class Cache:
     """In-memory cache for API responses."""
 
     def __init__(self):
-        self._prices_cache: dict[str, list[dict[str, any]]] = {}
-        self._financial_metrics_cache: dict[str, list[dict[str, any]]] = {}
-        self._line_items_cache: dict[str, list[dict[str, any]]] = {}
-        self._insider_trades_cache: dict[str, list[dict[str, any]]] = {}
-        self._company_news_cache: dict[str, list[dict[str, any]]] = {}
+        """Initialize empty caches."""
+        self._price_cache: dict[str, list[dict[str, any]]] = {}
+        self._news_cache: dict[str, list[dict[str, any]]] = {}
+        self._financials_cache: dict[str, list[dict[str, any]]] = {}
+        self._market_cache: dict[str, list[dict[str, any]]] = {}
+
+    def clear(self):
+        """Clear all caches."""
+        self._price_cache.clear()
+        self._news_cache.clear()
+        self._financials_cache.clear()
+        self._market_cache.clear()
 
     def _merge_data(self, existing: list[dict] | None, new_data: list[dict], key_field: str) -> list[dict]:
         """Merge existing and new data, avoiding duplicates based on a key field."""
         if not existing:
-            return new_data
+            return sorted(new_data, key=lambda x: x[key_field], reverse=True)
         
-        # Create a set of existing keys for O(1) lookup
-        existing_keys = {item[key_field] for item in existing}
+        # Create a dictionary of existing items for O(1) lookup and update
+        merged_dict = {item[key_field]: item for item in existing}
         
-        # Only add items that don't exist yet
-        merged = existing.copy()
-        merged.extend([item for item in new_data if item[key_field] not in existing_keys])
-        return merged
+        # Update with new items
+        for item in new_data:
+            key = item[key_field]
+            if key not in merged_dict:
+                merged_dict[key] = item
+        
+        # Convert back to list and sort by key field
+        merged = list(merged_dict.values())
+        return sorted(merged, key=lambda x: x[key_field], reverse=True)
+
+    def _convert_to_model(self, data: list[dict], model_cls: Type[T]) -> list[T]:
+        """Convert a list of dictionaries to a list of Pydantic models."""
+        return [model_cls(**item) for item in data]
 
     def get_prices(self, ticker: str) -> list[dict[str, any]] | None:
         """Get cached price data if available."""
-        return self._prices_cache.get(ticker)
+        return self._price_cache.get(ticker)
 
     def set_prices(self, ticker: str, data: list[dict[str, any]]):
         """Append new price data to cache."""
-        self._prices_cache[ticker] = self._merge_data(
-            self._prices_cache.get(ticker),
+        self._price_cache[ticker] = self._merge_data(
+            self._price_cache.get(ticker),
             data,
             key_field="time"
         )
 
     def get_financial_metrics(self, ticker: str) -> list[dict[str, any]]:
         """Get cached financial metrics if available."""
-        return self._financial_metrics_cache.get(ticker)
+        return self._financials_cache.get(ticker)
 
     def set_financial_metrics(self, ticker: str, data: list[dict[str, any]]):
         """Append new financial metrics to cache."""
-        self._financial_metrics_cache[ticker] = self._merge_data(
-            self._financial_metrics_cache.get(ticker),
+        self._financials_cache[ticker] = self._merge_data(
+            self._financials_cache.get(ticker),
             data,
             key_field="report_period"
         )
 
     def get_line_items(self, ticker: str) -> list[dict[str, any]] | None:
         """Get cached line items if available."""
-        return self._line_items_cache.get(ticker)
+        return self._financials_cache.get(ticker)
 
     def set_line_items(self, ticker: str, data: list[dict[str, any]]):
         """Append new line items to cache."""
-        self._line_items_cache[ticker] = self._merge_data(
-            self._line_items_cache.get(ticker),
+        self._financials_cache[ticker] = self._merge_data(
+            self._financials_cache.get(ticker),
             data,
             key_field="report_period"
         )
 
-    def get_insider_trades(self, ticker: str) -> list[dict[str, any]] | None:
-        """Get cached insider trades if available."""
-        return self._insider_trades_cache.get(ticker)
-
-    def set_insider_trades(self, ticker: str, data: list[dict[str, any]]):
-        """Append new insider trades to cache."""
-        self._insider_trades_cache[ticker] = self._merge_data(
-            self._insider_trades_cache.get(ticker),
-            data,
-            key_field="filing_date"  # Could also use transaction_date if preferred
-        )
-
-    def get_company_news(self, ticker: str) -> list[dict[str, any]] | None:
+    def get_company_news(self, ticker: str, model_cls: Type[T] = None) -> list[dict[str, any]] | list[T] | None:
         """Get cached company news if available."""
-        return self._company_news_cache.get(ticker)
+        data = self._news_cache.get(ticker)
+        if data and model_cls:
+            return self._convert_to_model(data, model_cls)
+        return data
 
     def set_company_news(self, ticker: str, data: list[dict[str, any]]):
         """Append new company news to cache."""
-        self._company_news_cache[ticker] = self._merge_data(
-            self._company_news_cache.get(ticker),
+        self._news_cache[ticker] = self._merge_data(
+            self._news_cache.get(ticker),
             data,
             key_field="date"
+        )
+
+    def get_market_data(self, ticker: str) -> list[dict[str, any]] | None:
+        """Get cached market data if available."""
+        return self._market_cache.get(ticker)
+
+    def set_market_data(self, ticker: str, data: list[dict[str, any]]):
+        """Append new market data to cache."""
+        self._market_cache[ticker] = self._merge_data(
+            self._market_cache.get(ticker),
+            data
         )
 
 

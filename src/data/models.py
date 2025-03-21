@@ -79,27 +79,7 @@ class LineItemResponse(BaseModel):
     search_results: list[LineItem]
 
 
-class InsiderTrade(BaseModel):
-    ticker: str
-    issuer: str | None
-    name: str | None
-    title: str | None
-    is_board_director: bool | None
-    transaction_date: str | None
-    transaction_shares: float | None
-    transaction_price_per_share: float | None
-    transaction_value: float | None
-    shares_owned_before_transaction: float | None
-    shares_owned_after_transaction: float | None
-    security_title: str | None
-    filing_date: str
-
-
-class InsiderTradeResponse(BaseModel):
-    insider_trades: list[InsiderTrade]
-
-
-class CompanyNews(BaseModel):
+class News(BaseModel):
     ticker: str
     title: str
     author: str
@@ -109,8 +89,8 @@ class CompanyNews(BaseModel):
     sentiment: str | None = None
 
 
-class CompanyNewsResponse(BaseModel):
-    news: list[CompanyNews]
+class NewsResponse(BaseModel):
+    news: list[News]
 
 
 class Position(BaseModel):
@@ -147,3 +127,13 @@ class AgentStateData(BaseModel):
 class AgentStateMetadata(BaseModel):
     show_reasoning: bool = False
     model_config = {"extra": "allow"}
+
+
+class MarketData(BaseModel):
+    """Market data model."""
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int

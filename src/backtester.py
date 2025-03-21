@@ -13,12 +13,12 @@ import itertools
 from llm.models import LLM_ORDER, get_model_info
 from utils.analysts import ANALYST_ORDER
 from main import run_hedge_fund
-from tools.api import (
-    get_company_news,
-    get_price_data,
+from src.tools.api import (
     get_prices,
     get_financial_metrics,
-    get_insider_trades,
+    search_line_items,
+    get_company_news,
+    get_market_data,
 )
 from utils.display import print_backtest_results, format_backtest_row
 from typing_extensions import Callable
@@ -286,11 +286,14 @@ class Backtester:
             # Fetch financial metrics
             get_financial_metrics(ticker, self.end_date, limit=10)
 
-            # Fetch insider trades
-            get_insider_trades(ticker, self.end_date, start_date=self.start_date, limit=1000)
+            # Fetch line items
+            search_line_items(ticker, [], self.end_date, start_date=self.start_date, limit=1000)
 
             # Fetch company news
             get_company_news(ticker, self.end_date, start_date=self.start_date, limit=1000)
+
+            # Fetch market data
+            get_market_data(ticker, self.end_date, start_date=self.start_date, limit=1000)
 
         print("Data pre-fetch complete.")
 
@@ -340,7 +343,7 @@ class Backtester:
             # Get current prices for all tickers
             try:
                 current_prices = {
-                    ticker: get_price_data(ticker, previous_date_str, current_date_str).iloc[-1]["close"]
+                    ticker: get_prices(ticker, previous_date_str, current_date_str).iloc[-1]["close"]
                     for ticker in self.tickers
                 }
             except Exception:
@@ -542,13 +545,18 @@ class Backtester:
 
         final_portfolio_value = performance_df["Portfolio Value"].iloc[-1]
         total_realized_gains = sum(
-            self.portfolio["realized_gains"][ticker]["long"] for ticker in self.tickers
+            self.portfolio["realized_gains"][ticker]["long"] +
+            self.portfolio["realized_gains"][ticker]["short"]
+            for ticker in self.tickers
         )
         total_return = ((final_portfolio_value - self.initial_capital) / self.initial_capital) * 100
 
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO PERFORMANCE SUMMARY:{Style.RESET_ALL}")
-        print(f"Total Return: {Fore.GREEN if total_return >= 0 else Fore.RED}{total_return:.2f}%{Style.RESET_ALL}")
-        print(f"Total Realized Gains/Losses: {Fore.GREEN if total_realized_gains >= 0 else Fore.RED}${total_realized_gains:,.2f}{Style.RESET_ALL}")
+        print("\nPERFORMANCE SUMMARY")
+        print("=" * 40)
+        print(f"Initial Capital: ${self.initial_capital:,.2f}")
+        print(f"Final Value: ${final_portfolio_value:,.2f}")
+        print(f"Total Return: {total_return:,.2f}%")
+        print(f"Total Realized Gains/Losses: ${total_realized_gains:,.2f}")
 
         # Plot the portfolio value over time
         plt.figure(figsize=(12, 6))
@@ -570,7 +578,7 @@ class Backtester:
             annualized_sharpe = np.sqrt(252) * ((mean_daily_return - daily_rf) / std_daily_return)
         else:
             annualized_sharpe = 0
-        print(f"\nSharpe Ratio: {Fore.YELLOW}{annualized_sharpe:.2f}{Style.RESET_ALL}")
+        print(f"Sharpe Ratio: {annualized_sharpe:.2f}")
 
         # Max Drawdown
         rolling_max = performance_df["Portfolio Value"].cummax()
@@ -578,15 +586,15 @@ class Backtester:
         max_drawdown = drawdown.min()
         max_drawdown_date = drawdown.idxmin()
         if pd.notnull(max_drawdown_date):
-            print(f"Maximum Drawdown: {Fore.RED}{max_drawdown * 100:.2f}%{Style.RESET_ALL} (on {max_drawdown_date.strftime('%Y-%m-%d')})")
+            print(f"Maximum Drawdown: {max_drawdown * 100:.2f}% (on {max_drawdown_date.strftime('%Y-%m-%d')})")
         else:
-            print(f"Maximum Drawdown: {Fore.RED}0.00%{Style.RESET_ALL}")
+            print(f"Maximum Drawdown: 0.00%")
 
         # Win Rate
         winning_days = len(performance_df[performance_df["Daily Return"] > 0])
         total_days = max(len(performance_df) - 1, 1)
         win_rate = (winning_days / total_days) * 100
-        print(f"Win Rate: {Fore.GREEN}{win_rate:.2f}%{Style.RESET_ALL}")
+        print(f"Win Rate: {win_rate:.2f}%")
 
         # Average Win/Loss Ratio
         positive_returns = performance_df[performance_df["Daily Return"] > 0]["Daily Return"]
@@ -597,7 +605,7 @@ class Backtester:
             win_loss_ratio = avg_win / avg_loss
         else:
             win_loss_ratio = float('inf') if avg_win > 0 else 0
-        print(f"Win/Loss Ratio: {Fore.GREEN}{win_loss_ratio:.2f}{Style.RESET_ALL}")
+        print(f"Win/Loss Ratio: {win_loss_ratio:.2f}")
 
         # Maximum Consecutive Wins / Losses
         returns_binary = (performance_df["Daily Return"] > 0).astype(int)
@@ -608,8 +616,8 @@ class Backtester:
             max_consecutive_wins = 0
             max_consecutive_losses = 0
 
-        print(f"Max Consecutive Wins: {Fore.GREEN}{max_consecutive_wins}{Style.RESET_ALL}")
-        print(f"Max Consecutive Losses: {Fore.RED}{max_consecutive_losses}{Style.RESET_ALL}")
+        print(f"Max Consecutive Wins: {max_consecutive_wins}")
+        print(f"Max Consecutive Losses: {max_consecutive_losses}")
 
         return performance_df
 
@@ -721,3 +729,45 @@ if __name__ == "__main__":
 
     performance_metrics = backtester.run_backtest()
     performance_df = backtester.analyze_performance()
+
+def format_backtest_row(
+    date: str,
+    ticker: str,
+    action: str,
+    quantity: int,
+    price: float,
+    shares_owned: int,
+    position_value: float,
+    bullish_count: int = 0,
+    bearish_count: int = 0,
+    neutral_count: int = 0,
+    is_summary: bool = False,
+    total_value: float = 0,
+    return_pct: float = 0,
+    cash_balance: float = 0,
+    total_position_value: float = 0,
+    sharpe_ratio: float = None,
+    sortino_ratio: float = None,
+    max_drawdown: float = None
+) -> dict:
+    """Format a row for the backtest results table."""
+    return {
+        "date": date,
+        "ticker": ticker,
+        "action": action,
+        "quantity": quantity,
+        "price": price,
+        "shares_owned": shares_owned,
+        "position_value": position_value,
+        "bullish_count": bullish_count,
+        "bearish_count": bearish_count,
+        "neutral_count": neutral_count,
+        "is_summary": is_summary,
+        "total_value": total_value,
+        "return_pct": return_pct,
+        "cash_balance": cash_balance,
+        "total_position_value": total_position_value,
+        "sharpe_ratio": sharpe_ratio,
+        "sortino_ratio": sortino_ratio,
+        "max_drawdown": max_drawdown
+    }

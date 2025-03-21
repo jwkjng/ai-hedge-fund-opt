@@ -1,288 +1,246 @@
-import sys
-
-from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-from langgraph.graph import END, StateGraph
-from colorama import Fore, Back, Style, init
-import questionary
-from agents.ben_graham import ben_graham_agent
-from agents.bill_ackman import bill_ackman_agent
-from agents.fundamentals import fundamentals_agent
-from agents.portfolio_manager import portfolio_management_agent
-from agents.technicals import technical_analyst_agent
-from agents.risk_manager import risk_management_agent
-from agents.sentiment import sentiment_agent
-from agents.warren_buffett import warren_buffett_agent
-from graph.state import AgentState
-from agents.valuation import valuation_agent
-from utils.display import print_trading_output
-from utils.analysts import ANALYST_ORDER, get_analyst_nodes
-from utils.progress import progress
-from llm.models import LLM_ORDER, get_model_info
-
+from datetime import datetime, timedelta
 import argparse
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
-from tabulate import tabulate
-from utils.visualize import save_graph_as_png
 import json
+from typing import Dict, Any, List
+import os
+from dotenv import load_dotenv
+
+from agents.fundamentals import FundamentalsAgent
+from agents.warren_buffett import WarrenBuffettAgent
+from agents.ben_graham import BenGrahamAgent
+from agents.bill_ackman import BillAckmanAgent
+from agents.sentiment import SentimentAgent
+from agents.risk_manager import RiskManagerAgent
+from graph.state import AgentState
+from utils.progress import progress
+from tools.api import (
+    get_market_status,
+    get_market_holidays,
+    get_company_news
+)
 
 # Load environment variables from .env file
 load_dotenv()
 
-init(autoreset=True)
+def get_agent_class(analyst_name: str):
+    """Get the agent class for a given analyst name."""
+    agent_map = {
+        "fundamentals": FundamentalsAgent,
+        "warren_buffett": WarrenBuffettAgent,
+        "ben_graham": BenGrahamAgent,
+        "bill_ackman": BillAckmanAgent,
+        "sentiment": SentimentAgent,
+        "risk_manager": RiskManagerAgent
+    }
+    return agent_map.get(analyst_name)
 
+def parse_hedge_fund_response(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse the response from the hedge fund agents."""
+    # Convert Pydantic model to dict if needed
+    if hasattr(response, "model_dump"):
+        response = response.model_dump()
 
-def parse_hedge_fund_response(response):
-    """Parses a JSON string and returns a dictionary."""
-    try:
-        return json.loads(response)
-    except json.JSONDecodeError as e:
-        print(f"JSON decoding error: {e}\nResponse: {repr(response)}")
-        return None
-    except TypeError as e:
-        print(f"Invalid response type (expected string, got {type(response).__name__}): {e}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
-        return None
+    signal = response.get("signal", "neutral")
+    if isinstance(signal, (int, float)):
+        # Convert numeric signal to string
+        if signal > 0.2:
+            signal = "bullish"
+        elif signal < -0.2:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+    
+    return {
+        "signal": signal,
+        "confidence": response.get("confidence", 0),
+        "reasoning": response.get("reasoning", "No reasoning provided")
+    }
 
-
-
-##### Run the Hedge Fund #####
 def run_hedge_fund(
     tickers: list[str],
     start_date: str,
     end_date: str,
-    portfolio: dict,
-    show_reasoning: bool = False,
-    selected_analysts: list[str] = [],
-    model_name: str = "gpt-4o",
+    portfolio: dict = None,
+    model_name: str = "gpt-4",
     model_provider: str = "OpenAI",
-):
-    # Start progress tracking
-    progress.start()
+    selected_analysts: list[str] = [],
+) -> dict:
+    """Run the hedge fund simulation."""
+    # Initialize empty dictionaries to store decisions and signals
+    decisions = {}
+    analyst_signals = {}
 
-    try:
-        # Create a new workflow if analysts are customized
-        if selected_analysts:
-            workflow = create_workflow(selected_analysts)
-            agent = workflow.compile()
-        else:
-            agent = app
+    # Get market status
+    market_status = get_market_status()
+    if market_status["market"] != "open":
+        print("\nMarket is currently closed. Skipping analysis.")
+        return {"decisions": {}, "analyst_signals": {}}
 
-        final_state = agent.invoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content="Make trading decisions based on the provided data.",
-                    )
-                ],
-                "data": {
-                    "tickers": tickers,
-                    "portfolio": portfolio,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "analyst_signals": {},
-                },
-                "metadata": {
-                    "show_reasoning": show_reasoning,
-                    "model_name": model_name,
-                    "model_provider": model_provider,
-                },
-            },
-        )
+    # Check for market holidays
+    holidays = get_market_holidays()
+    if any(holiday["date"] == end_date for holiday in holidays["holidays"]):
+        print(f"\nMarket holiday on {end_date}. Skipping analysis.")
+        return {"decisions": {}, "analyst_signals": {}}
 
-        return {
-            "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
-            "analyst_signals": final_state["data"]["analyst_signals"],
-        }
-    finally:
-        # Stop progress tracking
-        progress.stop()
+    print(f"\n{'=' * 80}")
+    print(f"ANALYZING STOCKS FOR {end_date}")
+    print(f"{'=' * 80}")
 
-
-def start(state: AgentState):
-    """Initialize the workflow with the input message."""
-    return state
-
-
-def create_workflow(selected_analysts=None):
-    """Create the workflow with selected analysts."""
-    workflow = StateGraph(AgentState)
-    workflow.add_node("start_node", start)
-
-    # Get analyst nodes from the configuration
-    analyst_nodes = get_analyst_nodes()
-
-    # Default to all analysts if none selected
-    if selected_analysts is None:
-        selected_analysts = list(analyst_nodes.keys())
-    # Add selected analyst nodes
-    for analyst_key in selected_analysts:
-        node_name, node_func = analyst_nodes[analyst_key]
-        workflow.add_node(node_name, node_func)
-        workflow.add_edge("start_node", node_name)
-
-    # Always add risk and portfolio management
-    workflow.add_node("risk_management_agent", risk_management_agent)
-    workflow.add_node("portfolio_management_agent", portfolio_management_agent)
-
-    # Connect selected analysts to risk management
-    for analyst_key in selected_analysts:
-        node_name = analyst_nodes[analyst_key][0]
-        workflow.add_edge(node_name, "risk_management_agent")
-
-    workflow.add_edge("risk_management_agent", "portfolio_management_agent")
-    workflow.add_edge("portfolio_management_agent", END)
-
-    workflow.set_entry_point("start_node")
-    return workflow
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the hedge fund trading system")
-    parser.add_argument(
-        "--initial-cash",
-        type=float,
-        default=100000.0,
-        help="Initial cash position. Defaults to 100000.0)"
-    )
-    parser.add_argument(
-        "--margin-requirement",
-        type=float,
-        default=0.0,
-        help="Initial margin requirement. Defaults to 0.0"
-    )
-    parser.add_argument("--tickers", type=str, required=True, help="Comma-separated list of stock ticker symbols")
-    parser.add_argument(
-        "--start-date",
-        type=str,
-        help="Start date (YYYY-MM-DD). Defaults to 3 months before end date",
-    )
-    parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD). Defaults to today")
-    parser.add_argument("--show-reasoning", action="store_true", help="Show reasoning from each agent")
-    parser.add_argument(
-        "--show-agent-graph", action="store_true", help="Show the agent graph"
-    )
-
-    args = parser.parse_args()
-
-    # Parse tickers from comma-separated string
-    tickers = [ticker.strip() for ticker in args.tickers.split(",")]
-
-    # Select analysts
-    selected_analysts = None
-    choices = questionary.checkbox(
-        "Select your AI analysts.",
-        choices=[questionary.Choice(display, value=value) for display, value in ANALYST_ORDER],
-        instruction="\n\nInstructions: \n1. Press Space to select/unselect analysts.\n2. Press 'a' to select/unselect all.\n3. Press Enter when done to run the hedge fund.\n",
-        validate=lambda x: len(x) > 0 or "You must select at least one analyst.",
-        style=questionary.Style(
-            [
-                ("checkbox-selected", "fg:green"),
-                ("selected", "fg:green noinherit"),
-                ("highlighted", "noinherit"),
-                ("pointer", "noinherit"),
-            ]
-        ),
-    ).ask()
-
-    if not choices:
-        print("\n\nInterrupt received. Exiting...")
-        sys.exit(0)
-    else:
-        selected_analysts = choices
-        print(f"\nSelected analysts: {', '.join(Fore.GREEN + choice.title().replace('_', ' ') + Style.RESET_ALL for choice in choices)}\n")
-
-    # Select LLM model
-    model_choice = questionary.select(
-        "Select your LLM model:",
-        choices=[questionary.Choice(display, value=value) for display, value, _ in LLM_ORDER],
-        style=questionary.Style([
-            ("selected", "fg:green bold"),
-            ("pointer", "fg:green bold"),
-            ("highlighted", "fg:green"),
-            ("answer", "fg:green bold"),
-        ])
-    ).ask()
-
-    if not model_choice:
-        print("\n\nInterrupt received. Exiting...")
-        sys.exit(0)
-    else:
-        # Get model info using the helper function
-        model_info = get_model_info(model_choice)
-        if model_info:
-            model_provider = model_info.provider.value
-            print(f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_choice}{Style.RESET_ALL}\n")
-        else:
-            model_provider = "Unknown"
-            print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_choice}{Style.RESET_ALL}\n")
-
-    # Create the workflow with selected analysts
-    workflow = create_workflow(selected_analysts)
-    app = workflow.compile()
-
-    if args.show_agent_graph:
-        file_path = ""
-        if selected_analysts is not None:
-            for selected_analyst in selected_analysts:
-                file_path += selected_analyst + "_"
-            file_path += "graph.png"
-        save_graph_as_png(app, file_path)
-
-    # Validate dates if provided
-    if args.start_date:
-        try:
-            datetime.strptime(args.start_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("Start date must be in YYYY-MM-DD format")
-
-    if args.end_date:
-        try:
-            datetime.strptime(args.end_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("End date must be in YYYY-MM-DD format")
-
-    # Set the start and end dates
-    end_date = args.end_date or datetime.now().strftime("%Y-%m-%d")
-    if not args.start_date:
-        # Calculate 3 months before end_date
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        start_date = (end_date_obj - relativedelta(months=3)).strftime("%Y-%m-%d")
-    else:
-        start_date = args.start_date
-
-    # Initialize portfolio with cash amount and stock positions
-    portfolio = {
-        "cash": args.initial_cash,  # Initial cash amount
-        "margin_requirement": args.margin_requirement,  # Initial margin requirement
-        "positions": {
-            ticker: {
-                "long": 0,  # Number of shares held long
-                "short": 0,  # Number of shares held short
-                "long_cost_basis": 0.0,  # Average cost basis for long positions
-                "short_cost_basis": 0.0,  # Average price at which shares were sold short
-            } for ticker in tickers
+    # Create agent state
+    state = AgentState({
+        "data": {
+            "tickers": tickers,
+            "start_date": start_date,
+            "end_date": end_date
         },
-        "realized_gains": {
-            ticker: {
-                "long": 0.0,  # Realized gains from long positions
-                "short": 0.0,  # Realized gains from short positions
-            } for ticker in tickers
+        "metadata": {
+            "show_reasoning": True
+        },
+        "portfolio": portfolio or {
+            "cash": 1000000,  # $1M starting cash
+            "positions": {}
         }
+    })
+
+    # Analyze each ticker
+    for ticker in tickers:
+        print(f"\n{'-' * 40}")
+        print(f"Analyzing {ticker}...")
+        print(f"{'-' * 40}")
+
+        # Get company news
+        news = get_company_news(ticker, end_date, start_date, test_mode=True)
+        if news:
+            print(f"\nLatest news for {ticker}:")
+            for n in news[:1]:  # Show only the most recent news
+                print(f"Date: {n.date}")
+                print(f"Title: {n.title}")
+                print(f"Source: {n.source}")
+                print(f"URL: {n.url}")
+
+        # Run analysis with each selected analyst
+        signals = {}
+        for analyst in selected_analysts:
+            agent_class = get_agent_class(analyst)
+            if agent_class:
+                agent = agent_class(
+                    name=analyst,
+                    description=f"{analyst.replace('_', ' ').title()} Analysis",
+                    config={}
+                )
+                signal_dict = agent.analyze(state)
+                signal = signal_dict.get(ticker)
+                if signal:
+                    signal = signal.model_dump()
+                else:
+                    signal = {
+                        "signal": "neutral",
+                        "confidence": 0,
+                        "reasoning": "Analysis failed"
+                    }
+                signals[analyst] = signal
+
+                print(f"\n{agent.name} Analysis:")
+                print(f"Signal: {signal['signal']}")
+                print(f"Confidence: {signal['confidence']:.1f}")
+                print(f"Reasoning: {signal['reasoning']}")
+
+        analyst_signals[ticker] = signals
+
+        # Aggregate signals to make trading decisions
+        bullish_count = len([s for s in signals.values() if s["signal"].lower() == "bullish"])
+        bearish_count = len([s for s in signals.values() if s["signal"].lower() == "bearish"])
+        neutral_count = len([s for s in signals.values() if s["signal"].lower() == "neutral"])
+        total_signals = len(signals)
+
+        # Default to hold
+        action = "hold"
+        quantity = 0
+
+        # Simple majority voting system
+        if total_signals > 0:
+            # Calculate position size based on conviction (% of signals agreeing)
+            max_position = 100  # Maximum position size
+            
+            if bullish_count > bearish_count and bullish_count > neutral_count:
+                action = "buy"
+                conviction = bullish_count / total_signals
+                quantity = int(max_position * conviction)
+            elif bearish_count > bullish_count and bearish_count > neutral_count:
+                action = "sell"
+                conviction = bearish_count / total_signals
+                quantity = int(max_position * conviction)
+
+        decisions[ticker] = {"action": action, "quantity": quantity}
+
+    return {
+        "decisions": decisions,
+        "analyst_signals": analyst_signals
     }
 
-    # Run the hedge fund
-    result = run_hedge_fund(
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Run hedge fund analysis")
+    parser.add_argument("--ticker", type=str, required=True, help="Comma-separated list of tickers to analyze")
+    parser.add_argument("--end_date", type=str, help="End date for analysis (YYYY-MM-DD)")
+    parser.add_argument("--start_date", type=str, help="Start date for analysis (YYYY-MM-DD)")
+    parser.add_argument("--show_reasoning", action="store_true", help="Show detailed reasoning")
+    return parser.parse_args()
+
+def start():
+    """Start the hedge fund analysis."""
+    args = parse_args()
+    
+    # Initialize agents with empty configs
+    agents = [
+        FundamentalsAgent("fundamentals", config={}),
+        WarrenBuffettAgent("warren_buffett", config={}),
+        BenGrahamAgent("ben_graham", config={}),
+        BillAckmanAgent("bill_ackman", config={}),
+        SentimentAgent("sentiment", config={}),
+        RiskManagerAgent("risk_manager", config={})
+    ]
+    
+    # Parse tickers
+    tickers = args.ticker.split(",")
+    
+    # Get end date (today)
+    end_date = datetime.now()
+    
+    # Get start date (1 year ago)
+    start_date = end_date - timedelta(days=365)
+    
+    # Format dates as strings
+    end_date_str = end_date.strftime("%Y-%m-%d")
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    
+    # Run analysis
+    output = run_hedge_fund(
         tickers=tickers,
-        start_date=start_date,
-        end_date=end_date,
-        portfolio=portfolio,
-        show_reasoning=args.show_reasoning,
-        selected_analysts=selected_analysts,
-        model_name=model_choice,
-        model_provider=model_provider,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        selected_analysts=[
+            "fundamentals",
+            "warren_buffett",
+            "ben_graham",
+            "bill_ackman",
+            "sentiment",
+            "risk_manager"
+        ]
     )
-    print_trading_output(result)
+    
+    # Print results using the display formatter
+    from utils.display import print_trading_output
+    print_trading_output(output)
+
+def main():
+    """Main function to run the hedge fund analysis."""
+    # Clear the cache
+    from data.cache import get_cache
+    get_cache().clear()
+    
+    # Run the analysis
+    start()
+
+if __name__ == "__main__":
+    main()
